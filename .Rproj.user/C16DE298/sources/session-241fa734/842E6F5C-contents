@@ -1,0 +1,177 @@
+---
+title: "Bridges Prophet Analysis"
+output: html_notebook
+---
+
+```{r setup,echo=FALSE, warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(
+	message = FALSE,
+	warning = FALSE,
+	include = TRUE
+)
+rm(list = ls(all = TRUE))
+
+# Change settings to not use scientific notation
+options(scipen = 20)
+
+# Load packages.
+# Data manipulation.
+library(tidyverse)
+library(tsibble)
+library(feasts)
+library(janitor)
+library(here)
+library(lubridate)
+
+# Plots.
+library(ggplot2)
+
+# Analyses.
+library(afex)
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(fable)
+library(fable.prophet)
+library(astsa)
+```
+
+## Facebook Prophet
+
+Prophet is a forecasting technique, developed by Facebook, that uses Gaussian Additive Models (GAM).
+GAM's allow for nonlinear predictors, unlike a linear regression, and therefore may be able to better model complex relationships between time and demand.
+The model that Prophet uses contains both a seasonal component and a "holiday" component, which is novel to Prophet.
+That is, you can specify when holidays occur, as they can strongly influence demand.
+However, because our dataset is recorded monthly, we may not be able to take advantage of modeling holidays as the seasonality at the year level is likely sufficient.
+
+```{r read in data, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Read in data
+i_am("EDA.Rmd")
+df <- read_csv(here("Data/BridgesForecastInput.csv"))
+
+# Clean up "Units" vector by changing "NULL" to NA)
+df <- df %>% na_if("NULL")
+df$UNITS <- as.numeric(df$UNITS)
+
+# Create single time vector (necessary for the package 'Fable' as it requires a single time vector)
+df$DATE <- make_date(df$CAL_YEAR,df$CAL_MONTH) %>% yearmonth()
+
+# Convert to tsibble
+df.ts <- df %>% as_tsibble(index=DATE,key=COMBO_SPLIT)
+
+# Remove any observations after March 2022 (as they are all null)
+df.ts <- df.ts %>% filter_index(~"2022 Mar")
+
+# Add constant 0.01 to any zero value so that MAPE can be calculated
+df.ts$UNITS <- ifelse(df.ts$UNITS==0,df.ts$UNITS+0.01,df.ts$UNITS)
+```
+
+## Fitting of Prophet model along with comparison models
+
+To see if Prophet provides any kind of improvement over the models previously fit (ARIMA, ETS, seasonal naive), I fit these four models and then calculated accuracy in modeling the training data.
+
+```{r model fitting, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Fit all models described above, this command automatically chooses the parameters for each kind of model based on lowest model fitment criteria scores
+fit <- df.ts %>% 
+  group_by(COMBO_SPLIT) %>% 
+  model(
+    snaive = SNAIVE(UNITS,lag="year"),
+    ets = ETS(UNITS),
+    arima = ARIMA(UNITS),
+    prophet = prophet(UNITS)
+  )
+
+# Calculate accuracy metrics like RMSE
+acc <- fit %>% accuracy()
+acc
+```
+
+It turns out that the Prophet models, across all COMBO_SPLIT's, have lower RMSE values than any of the other three models fit.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+# Filter and display best fitting models
+bestfits <- acc %>% 
+  group_by(COMBO_SPLIT) %>% 
+  filter(RMSE==min(RMSE))
+
+bestfits
+```
+
+I plotted the fitted values from the Prophet models against the observed values, and they do appear to fit the data well:
+
+```{r echo=TRUE, fig.height=12, fig.width=14, message=FALSE, warning=FALSE}
+# Plot original values and then overlay the fitted values on top from each of the four models
+df.ts %>% ggplot(aes(x=DATE,y=UNITS)) + geom_line() + geom_line(data=augment(fit) %>% filter(.model=="prophet"),aes(y=.fitted,color=.model),linetype="dotted",size=1) + facet_wrap(~COMBO_SPLIT,scales = "free_y")
+```
+
+Again, I forecasted out three years to see what Prophet's forecasts might look like.
+Some of them seem sensible, however there are some where the number of units are nonsensical.
+I think this issue is due to the sparsity of our dataset, hence the warning about `n.changepoints greater than number of observations` earlier.
+
+```{r echo=TRUE, fig.height=12, fig.width=14, message=FALSE, warning=FALSE}
+
+# Forecast and then plot all models' predictions (this will take longer than before because of Prophet)
+fc <- fit %>% forecast(h = "3 years") 
+
+# Plot
+autoplot(fc,df.ts,level=NULL) + facet_wrap(~COMBO_SPLIT,scales="free_y")
+```
+
+Then to check the accuracy of these forecasts, I created a training set using the data from 2019 and 2020, fit models, and then tested their forecasts against the held-out data from 2021.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+# Create training set using data from 2019 and 2020
+train <- df.ts %>%
+  filter(year(DATE) < 2021)
+
+# Fit models to the training data, including a "mixed" model which is just an average of the predictions of the three other statistical models
+testmodels <- train %>%
+  model(
+    ets = ETS(UNITS),
+    arima = ARIMA(UNITS),
+    snaive = SNAIVE(UNITS),
+    prophet = prophet(UNITS)
+  ) %>%
+  mutate(mixed = (ets + arima + snaive) / 3)
+
+# Forecast 2021's data as a test case (2 COMBO_SPLIT's had no data before 2019 and therefore were not included)
+fc.test <- testmodels %>% forecast(h = "1 year")
+
+# Plot the forecasted values vs the actual values from Prophet
+fc.test %>% filter(.model=="prophet") %>% autoplot(df.ts, level = NULL) + facet_wrap(~COMBO_SPLIT,scales="free_y")
+```
+
+The plot above shows the predicted values vs. the actual values from the Prophet models, and they look like they performed very poorly.
+Unsurprisingly, there were no COMBO_SPLIT's where the Prophet model outperformed any of the other statistical models.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+# Check accuracy of the forecasts
+test.acc <- accuracy(fc.test,df.ts) %>% 
+  group_by(COMBO_SPLIT)
+        
+# Narrow down to the highest accuracy model for each COMBO_SPLIT using RMSE scores  
+best.test <- test.acc %>%
+  group_by(COMBO_SPLIT) %>% 
+  filter(RMSE==min(RMSE))
+
+best.test
+```
+
+Inspecting the residuals of the Prophet models for a few COMBO_SPLIT's shows that there was considerable information underutilized as there's significant autocorrelation in the residuals.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+# Residuals for COMBO_SPLIT AAF001-412004
+testmodels %>% filter(COMBO_SPLIT=="AAF001-412004") %>% select(prophet) %>% gg_tsresiduals()
+
+# Residuals for COMBO_SPLIT ACE001-828019
+testmodels %>% filter(COMBO_SPLIT=="ACE001-828019") %>% select(prophet) %>% gg_tsresiduals()
+```
+
+## Conclusions
+
+On face-value, Prophet performed very poorly compared to the other statistical models and would not be used to forecast this data.
+However, it does seem that the datatset is probably too sparse for Prophet to work optimally, as evidenced by the warnings given when fitting the models.
+It's also important to note that the more novel aspect of Prophet, which is the ability to utilize information about holidays in the model, was not utilized here.
+That said, considering this is a real dataset that is indicative of the kind of challenging forecasting situations we want to improve performance on, it's difficult to give Prophet a strong endorsement in this case.
+That said, it is relatively simple to implement, with the exception of specifying when holidays occur, and is only slightly more computationally intensive than the typical statistical models.

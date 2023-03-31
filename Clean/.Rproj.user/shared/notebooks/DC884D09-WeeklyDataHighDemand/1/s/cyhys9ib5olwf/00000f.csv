@@ -1,0 +1,7 @@
+"0","# Set working directory based upon location of this notebook"
+"0","i_am(""WeeklyHighDemandData.Rmd"")"
+"2","Error: Could not find associated project in working directory or any parent directory.
+- Path in project: WeeklyHighDemandData.Rmd
+- Current working directory: C:/Users/disal/Desktop/GitHubRepos/ForecastingProject/Clean/WeeklyHighDemand
+Please open the project associated with this file and try again.
+"

@@ -1,0 +1,328 @@
+---
+title: "Intermittent Demand Analysis - Tyler's Version of Croston's"
+output:
+  html_notebook:
+   toc: yes
+   theme: readable
+editor_options: 
+  chunk_output_type: inline
+---
+
+------------------------------------------------------------------------
+
+```{r load libraries, message=FALSE, warning=FALSE, include=FALSE}
+# Change settings to not use scientific notation
+options(scipen = 999)
+
+# Load packages.
+# Data manipulation.
+library(tidyverse)
+library(tidytable)
+library(janitor)
+library(here)
+library(lubridate)
+library(future)
+library(magrittr)
+library(reticulate)
+library(kableExtra)
+library(tsbox)
+
+# Plots.
+library(ggplot2)
+library(patchwork)
+library(knitr)
+
+# Analyses.
+library(fpp3)
+library(fable.prophet)
+library(fasster)
+```
+
+```{r read in data, message=FALSE, warning=FALSE, include=FALSE}
+# Read in data
+i_am("Intermit_Demand_Neural.Rmd")
+df <- read_csv(here("BridgesForecastInput.csv"))
+
+# Clean up "Units" vector by changing "NULL" to NA
+df %<>% na_if("NULL") %>% 
+  mutate.(UNITS=as.numeric(UNITS))
+
+# Create single time vector (necessary for the package 'Fable' as it requires a single time vector instead of month and year in separate columns)
+df$DATE <- make_date(df$CAL_YEAR,df$CAL_MONTH) %>% yearmonth()
+
+# Drop SQL duplicated issues
+df %<>% filter.(are_duplicated(df,index=DATE,key=COMBO_SPLIT)==F)
+
+# Rename COMBO_SPLITS to numberic values in order
+df$COMBO_SPLIT <- as.factor(df$COMBO_SPLIT)
+levels(df$COMBO_SPLIT) <- 01:0823
+
+df %<>% 
+  mutate.(COMBO_SPLIT=as.character(df$COMBO_SPLIT)) %>% 
+  mutate.(COMBO_SPLIT=str_pad(df$COMBO_SPLIT, 3, pad = "0")) # pad with zero for ordering purposes
+
+# Convert to tsibble
+df.ts <- df %>% as_tsibble(index=DATE,key=COMBO_SPLIT)
+
+# Remove any observations after March 2022 (as they are all null)
+df.ts %<>% filter_index(~"2022 Mar")
+
+# Change negative UNITS values to 0
+df.ts$UNITS <- ifelse(df.ts$UNITS < 0,0,df.ts$UNITS)
+
+# Limit analysis to combos with at least 30 months data
+df.ts %<>% 
+  as_tibble() %>% 
+  group_by(COMBO_SPLIT) %>% 
+  filter(n() > 30)
+```
+
+```{r Add demand categories, message=FALSE, warning=FALSE, include=FALSE}
+source_python("../forecast_categories_v1.py")
+
+df.ts %<>% 
+  as_tibble() %>% 
+  select.(COMBO_SPLIT,DATE,UNITS) %>% 
+  mutate.(DATE=as.Date(DATE),OFFSET=as.numeric(DATE-today())) %>%
+  rename.(CAL_PERIOD=DATE)
+  
+df.ts <- forecast_plots(df.ts)
+
+# Convert dataframe back to tsibble
+df.ts %<>% 
+  mutate.(CAL_PERIOD=yearmonth(as.Date(CAL_PERIOD))) %>% 
+  as_tsibble(key=COMBO_SPLIT,index=CAL_PERIOD)
+
+kable(df.ts %>% 
+  as_tibble() %>% 
+  group_by(DEMAND_CATEGORY) %>%
+  summarise(n=n_distinct(COMBO_SPLIT))) %>% kable_styling(full_width = F,font_size = 18)
+```
+
+```{r Calculate percent zero demand, message=FALSE, warning=FALSE, include=FALSE}
+# Calculate percent of zero demand periods for each combo
+zeros <- df.ts %>%
+  as_tibble() %>% 
+  filter.(UNITS==0,
+         .by=COMBO_SPLIT) %>% 
+  summarise.(n_zero=n(),
+             .by=COMBO_SPLIT)
+
+df.ts %<>% 
+  add_count(COMBO_SPLIT) %>%
+  left_join.(zeros,by="COMBO_SPLIT") %>% 
+  mutate.(pct_zero = 100*(n_zero/n))
+```
+
+## Analyzing the data using conventional methods
+
+We had some success previously using Croston's method in addition to the naive or seasonal naive method.
+I forgot that the same R package contains a simple feed-forward neural network that might also be useful in this situation as it doesn't rely on linear relationships in the signal, which may not exist in the intermittent demand combos.
+
+I limited the data just to combos with more than 20% zero periods but less than 80% zero periods total and fit the models:
+
+```{r fit conventional models, echo=TRUE, message=FALSE, warning=FALSE}
+# Filter to combos with more than 20% of periods as zero
+df.ts %<>% filter(pct_zero >= 20 & pct_zero < 80)
+
+# Make tsibble again
+df.ts %<>% as_tsibble(key=COMBO_SPLIT,index=CAL_PERIOD)
+
+# Create training set
+train <- df.ts %>%
+  group_by(COMBO_SPLIT) %>% 
+  slice_head(prop=0.8) %>% 
+  as_tsibble(key=COMBO_SPLIT,index=CAL_PERIOD)
+
+# Fit all models described above, this command automatically chooses the parameters for each kind of model based on lowest model fitment criteria scores
+plan(multisession)
+
+fit <- train %>% 
+  group_by(COMBO_SPLIT) %>% 
+  model(
+    mean = MEAN(UNITS),
+    croston = CROSTON(UNITS,type="sbj"),
+    neural = NNETAR(UNITS,lambda = 0)
+  ) %>% 
+  mutate(combination=(mean+croston+neural)/3)
+
+# Forecast test data
+test <- df.ts %>% 
+  group_by(COMBO_SPLIT) %>% 
+  anti_join(train) %>% 
+  as_tsibble(key=COMBO_SPLIT,index=CAL_PERIOD)
+
+plan(multisession)
+
+fc <- fit %>% 
+  forecast(test)
+
+# Calculate test accuracy
+test.acc.fable <- fabletools::accuracy(fc,df.ts)
+```
+
+I then narrowed the data down to the just the best fitting model for each combo:
+
+```{r calculate best fitting conventional model, echo=FALSE, message=FALSE, warning=FALSE}
+# Narrow down to the highest accuracy model for each COMBO_SPLIT using MASE scores 
+best.test <- test.acc.fable %>%
+  filter.(MASE==min(MASE),
+          .by=COMBO_SPLIT)
+
+# Calculate the proportion of the data for which each type of model was most accurate
+knitr::kable(best.test %>% 
+  group_by(.model) %>% 
+  summarize(n=n(),avg.MASE=mean(MASE)) %>% 
+  arrange(-n) %>% 
+  na.omit(),
+  caption="Average MASE score for best fitting models on intermittent-demand combos",
+  digits=3) %>% 
+  kable_styling(full_width = F,font_size = 18)
+```
+
+Looking at the table, Croston's is slightly outperforming the naive model, but it does so for a large number of combos.
+However, the simple neural network is working well for almost the same number of combos, but is much more accurate.
+The best accuracy is achieved with the combination of all of the forecasts, but this works for the least amount of combos.
+
+## Tyler's Idea for Croston's
+
+I also tried to implement the idea that Tyler had in our meeting, which is using Croston's to create a one-step ahead prediction, then incorporate that prediction into the training set in order to predict the next month's data.
+This way, unique values are generated for each forecast point, unlike the way Croston's conventionally works where it produces the average demand per period (which is a single value).
+
+```{r Tylers idea, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Define training set (nothing different here from usual approach)
+tyler.train <- df.ts %>%
+  group_by(COMBO_SPLIT) %>% 
+  slice_head(prop=0.8) %>% 
+  as_tsibble(key="COMBO_SPLIT",index=CAL_PERIOD)
+
+# Start process
+# Create an empty list to store the predictions in later
+datalist = list()
+
+# Loop over each combo in the data
+for (x in unique(tyler.train$COMBO_SPLIT)){
+    # Filter down to current combo
+    data <- tyler.train %>% 
+      filter(COMBO_SPLIT==x)
+    
+    # Calculate how many predictions to make
+    n_total <- df.ts %>% 
+    filter(COMBO_SPLIT==x) %>% 
+    nrow()
+    
+    # Calculate number of rows in training set
+    n_train <- data %>% nrow()
+    
+    # Calculate number of periods to predict
+    n_predict <- n_total-n_train
+  
+    # Predict
+    # Loop over number of predictions need to be made
+    for (i in 1:n_predict){
+      # Fit croston's model with forecast horizon of 1 month  
+      temp <- tyler.train %>% 
+          filter(COMBO_SPLIT==x) %>%  
+          model(
+            croston.tyler = CROSTON(UNITS,type="sbj")
+          ) %>% 
+          forecast(h=1)
+          
+          # rename dataframe so it doesn't get overwritten
+          assign(paste0("temp", i), temp)
+  
+          # Clean up resulting forecast table and convert to tsibble
+          tyler.fc.reduced <- temp %>% 
+          as_tibble() %>% 
+          select(-UNITS,-.model) %>% 
+          rename(UNITS=.mean) %>% 
+          as_tsibble(index=CAL_PERIOD)
+        
+          # Append new prediction to training data
+          tyler.train %<>% bind_rows(tyler.fc.reduced)
+
+    }
+    # Get all of the temporary dataframes
+    dfs <- lapply(ls(pattern="^temp"), function(x) get(x))
+    # Convert them to tibbles
+    dfs <- lapply(dfs,as_tibble)
+    # Combine them together
+    dfs <- bind_rows(dfs)
+    # Convert to list for storage
+    dfs <- list(dfs)
+    # Add them to main list demarcated by combo
+    datalist[[x]] <- dfs
+    # Remove temporary data frames
+    rm(list = ls()[grepl("temp", ls())])
+}
+
+# Combine all sublists into one big dataframe
+tyler.fc <- do.call(bind_rows, datalist)
+
+# Calculate accuracy of this forecast
+tyler.fc.acc <- tyler.fc %>% 
+  distinct() %>% 
+  as_tsibble(key=COMBO_SPLIT,index=CAL_PERIOD) %>% 
+  as_fable(response="UNITS",distribution=UNITS) %>% 
+  fabletools::accuracy(df.ts)
+
+# Combine accuracy across methods
+tyler.fc.acc %<>% 
+  union_all(test.acc.fable)
+```
+
+This version does take quite a bit longer to run than the conventional version of Croston's, but that is partially an artifact of R's "slow" implementation of loops.
+The question remains as to whether this produces reasonable results
+
+```{r Tyler Acc, echo=FALSE, message=FALSE, warning=FALSE}
+kable(tyler.fc.acc %>% 
+        select(.model,COMBO_SPLIT,MASE,MAE,RMSSE) %>% 
+        group_by(.model) %>%
+        summarize(avg.MASE=mean(MASE),
+                  avg.RMSE=mean(RMSSE))) %>% 
+  kable_styling(full_width = F, font_size = 18)
+```
+
+First we can look at the average accuracy for each method based on MASE and RMSSE (the same idea as MASE but using RMSE instead of MAE).
+While it would be exciting to see Tyler's idea lead to much lower average accuracy, the fact that it's essentially identical to the accuracy of the conventional Croston's method is actually a good sign - at least it's not doing something completely random and leading to inaccurate forecasts.
+Overall average accuracy is not necessarily as important because we wouldn't select a single model to apply to all combos.
+Instead, we should look at the average accuracy for when a given model is the best performing one.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+kable(tyler.fc.acc %>% 
+        select(.model,COMBO_SPLIT,MASE,MAE,RMSSE) %>% 
+        group_by(COMBO_SPLIT) %>% 
+        filter(MASE==min(MASE)) %>%
+        group_by(.model) %>% 
+        summarize(avg.MASE=mean(MASE),n=n())) %>% 
+  kable_styling(full_width = F, font_size = 18)
+
+avg.dec <- tyler.fc.acc %>% 
+  select(.model,COMBO_SPLIT,MASE) %>% 
+  pivot_wider(id_cols=COMBO_SPLIT,names_from = .model,values_from =MASE) %>%
+  group_by(COMBO_SPLIT) %>%
+  summarise(diff=croston-croston.tyler) %>% 
+  filter(diff > 0.01)
+```
+
+Now this is more exciting.
+Tyler's version not only has a lower average MASE for the models it is the best performing on, it's the best model for 30% more combos than the conventional Croston's.
+I also calculated the average decrease in MASE for when Tyler's version was superior to the conventional Croston's, which was a drop of `r signif(mean(avg.dec$diff),2)`.
+The feed-forward neural network is still best, but this is very promising!
+
+The last thing I was curious about was whether Tyler's version was working better for combos that had less zeroes in them, but that was not the case.
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+crost.tyler.combos <- tyler.fc.acc %>% 
+        select(.model,COMBO_SPLIT,MASE,MAE,RMSSE) %>% 
+        group_by(COMBO_SPLIT) %>% 
+        filter(MASE==min(MASE)) %>%
+        group_by(.model) %>%
+        filter(.model=="croston.tyler")
+
+df.ts %>%
+  as_tibble() %>% 
+  filter(COMBO_SPLIT %in% crost.tyler.combos$COMBO_SPLIT) %>% 
+  summarise(avg.pct.zero=mean(pct_zero))
+```

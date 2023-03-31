@@ -1,0 +1,38 @@
+"0","```r
+# Read in data
+i_am(\"Intermittent_Demand_Analysis.Rmd\")
+df <- read_csv(here(\"BridgesForecastInput.csv\"))
+
+# Clean up \"Units\" vector by changing \"NULL\" to NA
+df %<>% na_if(\"NULL\") %>% 
+  mutate.(UNITS=as.numeric(UNITS))
+
+# Create single time vector (necessary for the package 'Fable' as it requires a single time vector instead of month and year in separate columns)
+df$DATE <- make_date(df$CAL_YEAR,df$CAL_MONTH) %>% yearmonth()
+
+# Drop SQL duplicated issues
+df %<>% filter.(are_duplicated(df,index=DATE,key=COMBO_SPLIT)==F)
+
+# Rename COMBO_SPLITS to numberic values in order
+df$COMBO_SPLIT <- as.factor(df$COMBO_SPLIT)
+levels(df$COMBO_SPLIT) <- 01:0823
+
+df %<>% 
+  mutate.(COMBO_SPLIT=as.character(df$COMBO_SPLIT)) %>% 
+  mutate.(COMBO_SPLIT=str_pad(df$COMBO_SPLIT, 3, pad = \"0\")) # pad with zero for ordering purposes
+
+# Convert to tsibble
+df.ts <- df %>% as_tsibble(index=DATE,key=COMBO_SPLIT)
+
+# Remove any observations after March 2022 (as they are all null)
+df.ts %<>% filter_index(~\"2022 Mar\")
+
+# Change negative UNITS values to 0
+df.ts$UNITS <- ifelse(df.ts$UNITS < 0,0,df.ts$UNITS)
+
+# Limit analysis to combos with at least 30 months data
+df.ts %<>% 
+  as_tibble() %>% 
+  group_by(COMBO_SPLIT) %>% 
+  filter(n() > 30)
+```"
