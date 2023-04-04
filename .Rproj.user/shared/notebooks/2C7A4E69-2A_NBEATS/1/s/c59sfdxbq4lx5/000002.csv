@@ -1,0 +1,68 @@
+"0","```r
+
+# Make tsibble
+df.ts.weekly <- df_weekly %>% 
+  as_tsibble(key=sku,index=date) %>% 
+  mutate(date=yearweek(date))
+
+# Create training set using data from 2015 to 2018
+train <- df.ts.weekly %>% 
+  group_by(sku) %>% 
+  slice_head(prop=0.9)
+
+# Fit models to the training data, including a \"mixed\" model which is just an average of the predictions of the models.
+plan(multisession)
+
+# Define decomposition model
+STLF <- decomposition_model(
+    STL(gross_units),
+    ETS(season_adjust)
+  )
+
+# Fit models and ensembles
+tictoc::tic()
+test.models <- train %>% 
+  model(
+    mean = MEAN(gross_units),
+    naive = NAIVE(gross_units),
+    snaive = SNAIVE(gross_units),
+    theta = THETA(gross_units),
+    ets = ETS(gross_units),
+    linreg = TSLM(gross_units),
+    arima = ARIMA(gross_units),
+    stlf = STLF,
+    prophet = prophet(gross_units ~ season(period=\"year\",3))) %>%  
+  mutate(simple_ensemble = (mean + naive + snaive)/3,
+         intermediate_ensemble = (theta + linreg + ets + arima + stlf)/5,
+         kitchen_sink_ensemble = (mean + naive + snaive + theta + linreg + ets + arima + stlf + prophet)/9)
+tictoc::toc()
+
+# Calculate training accuracy
+train.acc <- fabletools::accuracy(test.models)
+
+# Forecast
+plan(multisession,workers=12)
+
+test <- df.ts.weekly %>%
+  group_by(sku) %>% 
+  slice_tail(prop=0.1)
+
+tictoc::tic()
+fc.test <- test.models %>% 
+  forecast(test)
+tictoc::toc()
+
+# Check accuracy of the forecasts
+tictoc::tic()
+fable.test.acc <- fabletools::accuracy(fc.test,df.ts.weekly)
+tictoc::toc()
+
+best.test <- test.acc %>%
+  filter.(MASE==min(MASE),
+          .by=sku)
+
+lowest.mase <- best.test %>% 
+  group_by(.model) %>% 
+  summarize(n=n(),avg.MASE=mean(MASE)) %>% 
+  arrange(-n)
+```"

@@ -1,0 +1,113 @@
+"0","```r
+
+# Fit N-BEATS Model
+model_fit_nbeats <- nbeats(
+  id                    = \"sku\",
+  freq                  = \"W\",
+  prediction_length     = FORECAST_HORIZON,
+  epochs                = 10,
+  scale                 = F,
+  loss_function         = \"MASE\",
+) %>%
+  set_engine(\"gluonts_nbeats\") %>%
+  fit(gross_units_std ~ date + sku, training(splits))
+
+model_fit_nbeats_ensemble <- nbeats(
+  id                    = \"sku\",
+  freq                  = \"W\",
+  prediction_length     = FORECAST_HORIZON,
+  epochs                = 10,
+  scale                 = F,
+  loss_function         = \"MASE\"
+) %>%
+  set_engine(\"gluonts_nbeats_ensemble\") %>%
+  fit(gross_units_std ~ date + sku, training(splits))
+
+# Fit DeepAR model
+model_fit_deepAR <- deep_ar(
+  id                    = \"sku\",
+  freq                  = \"W\",
+  prediction_length     = FORECAST_HORIZON,
+  epochs                = 10,
+  scale                 = F,
+) %>%
+  set_engine(\"gluonts_deepar\") %>%
+  fit(gross_units_std ~ date + sku, training(splits))
+
+# detach(\"package:modeltime.gluonts\", unload = TRUE)
+# library(neuralprophet)
+# 
+# model_fit_nprophet <- neural_prophet(
+#     freq            = \"W\",
+#     growth          = \"linear\",
+#     trend_reg       = 3,
+#     learn_rate      = 0.1,
+#     epochs          = 10,
+#     changepoint_range = 0.8,
+#     seasonality_mode = \"additive\",
+#     seasonality_daily = F
+# ) %>%
+#     set_engine(\"prophet\") %>%
+#     fit(gross_units ~ date, training(splits))
+# 
+parallel_start(12)
+
+# Fit Prophet model 
+model_fit_prophet <- prophet_reg(seasonality_daily = F) %>% 
+  set_engine(\"prophet\") %>%
+  fit(gross_units_std ~ date, training(splits))
+
+# Fit ARIMA model
+model_fit_ARIMA <- arima_reg() %>%
+  set_engine(\"auto_arima\") %>%
+  fit(gross_units_std ~ date, training(splits))
+
+# Fit ETS model
+model_fit_ETS <- exp_smoothing() %>%
+  set_engine(\"ets\") %>% 
+  fit(gross_units_std ~ date, training(splits))
+
+# Fit Theta model
+model_fit_theta <- exp_smoothing() %>%
+  set_engine(\"theta\") %>% 
+  fit(gross_units_std ~ date, training(splits))
+
+# Fit Naive model
+model_fit_naive <- naive_reg(id=\"sku\") %>% 
+  set_engine(\"naive\") %>% 
+  fit(gross_units_std ~ date + sku, training(splits))
+
+# Fit Seasonal Naive model
+model_fit_snaive <- naive_reg(id=\"sku\",
+                              seasonal_period = 12) %>% 
+  set_engine(\"snaive\") %>% 
+  fit(gross_units_std ~ date + sku, training(splits))
+
+# Model fit TBATS
+model_fit_TBATS <- seasonal_reg() %>% 
+  set_engine(\"tbats\") %>% 
+  fit(gross_units_std ~ date, training(splits))
+
+# ---- MODELTIME TABLE ----
+
+models_tbl <- modeltime_table(
+    model_fit_nbeats,
+    model_fit_nbeats_ensemble,
+    model_fit_deepAR,
+    model_fit_prophet,
+    model_fit_ARIMA,
+    model_fit_ETS,
+    model_fit_theta,
+    model_fit_naive,
+    model_fit_snaive,
+    model_fit_TBATS
+)
+
+# ---- CALIBRATE ----
+
+calibration_tbl <- models_tbl %>% 
+    modeltime_calibrate(
+        new_data = testing(splits),
+        id = \"sku\"
+    )
+```"

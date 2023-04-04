@@ -1,0 +1,34 @@
+"0","```r
+# Read in data
+df <- fread.(file=\"2Adata.csv\") %>% 
+  select.(1:3) %>% 
+  mutate.(transaction_date=as.Date(transaction_date),
+          sku=as.factor(sku))
+
+
+# Create weekly dataframe from daily data
+df_weekly <- df %>% 
+  group_by(sku,week=yearweek(transaction_date)) %>% 
+  summarise(gross_units=sum(gross_units,na.rm=TRUE))
+
+# Filter to only complete combos
+df_weekly %<>% 
+  filter.(n()==187,.by=sku)
+
+lb <- df_weekly %>% 
+  summarise.(test=ljung_box(gross_units,h=8)[2],
+            .by=sku)
+
+# How many of the time-series are white noise
+lb %<>% filter.(test < 0.05) # 241 are white-noise, 457 have some predictable quality
+
+# Filter main dataset down to those that are not white noise
+df_weekly %<>% 
+  filter.(sku %in% lb$sku,
+          .by=sku) %>% 
+  mutate.(date=as.Date(week),sku=as.factor(sku)) %>% 
+  select.(-week)
+
+# Remove large data frames to free up memory
+rm(df)
+```"

@@ -1,0 +1,7 @@
+"0","# Calculate best fitting models
+best.test.weekly <- test.acc.weekly %>%
+  group_by(sku) %>% 
+  filter(MASE==min(MASE))
+"
+"2","Error in group_by(., sku) : object 'test.acc.weekly' not found
+"
