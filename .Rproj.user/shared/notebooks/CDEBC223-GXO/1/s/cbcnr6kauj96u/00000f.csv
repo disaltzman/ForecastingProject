@@ -1,6 +1,0 @@
-"0",""
-"0","# Perform Ljung-Box test"
-"0","lb <- df.ts %>% "
-"0","  as_tibble() %>% "
-"0","  group_by(PRODUNIT_ID) %>% "
-"0","  summarise(p.value=ljung_box(QTY,lag=28)[2])"

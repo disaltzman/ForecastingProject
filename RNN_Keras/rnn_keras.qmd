@@ -7,7 +7,7 @@ editor: visual
 
 # The Business Problem
 
-QueBIT...
+With the proliferation if interest in deep learning across almost all financial sectors, QueBIT wanted me and a team of other consultants to investigate how a deep learning might be used in their forecasting approach for on client data. The dataset that I used was daily level data of actions performed in a warehouse, and the client wanted to forecast how many of these actions would be taken in the future as to adjust hiring accordingly. This dataset covered almost two years worth of data, which made it a better candidate for a neural network than sales data, which tended to be monthly and insufficient for training a model to outperform a naive forecast.
 
 ## Data Cleaning
 
@@ -104,10 +104,10 @@ The RNN that we are building cannot take dates as an input, and therefore our da
 
 # Create various temporal features
 df_features = (df
-                .assign(day = df.index.day)
+                .assign(day = df.index.isocalendar().day)
                 .assign(month = df.index.month)
-                .assign(day_of_week = df.index.dayofweek)
-                .assign(week_of_year = df.index.week)
+                .assign(day_of_week = df.index.weekday)
+                .assign(week_of_year = df.index.isocalendar().week)
                 )
 ```
 
@@ -167,24 +167,24 @@ lookback_length = 5
 
 # create training generator
 train_generator = TimeseriesGenerator(
-  train_data.values,
-  train_data.values[:,0].reshape((len(train_data.values), 1)),
+  train_data.values.astype('float32'),
+  train_data.values[:,0].reshape((len(train_data.values), 1)).astype('float32'),
   length=lookback_length,
   batch_size=len(train_data)
 )
 
 # create test generator
 test_generator = TimeseriesGenerator(
-  test_data.values,
-  test_data.values[:,0].reshape((len(test_data.values), 1)),
+  test_data.values.astype('float32'),
+  test_data.values[:,0].reshape((len(test_data.values), 1)).astype('float32'),
   length=lookback_length,
   batch_size=1
 )
 
 # create holdout generator
 hold_generator = TimeseriesGenerator(
-  holdout_data.values,
-  holdout_data.values[:,0].reshape((len(holdout_data.values), 1)),
+  holdout_data.values.astype('float32'),
+  holdout_data.values[:,0].reshape((len(holdout_data.values), 1)).astype('float32'),
   length=lookback_length,
   batch_size=1
 )
@@ -201,10 +201,10 @@ Now we get to the fun part, which is assembling the model. Keras allows you to e
 print("timesteps, features:", lookback_length, n_features)
 
 # Initialize model
-model = Sequential()
+model = Sequential(name=')
 
 # Add recurrence to model
-model.add(SimpleRNN(4, activation='relu', input_shape=(lookback_length, n_features), return_sequences = False))
+model.add(SimpleRNN(50, activation='relu', input_shape=(lookback_length, n_features), return_sequences = False))
 
 # Add fully connected layer
 model.add(Dense(1, activation='relu'))
@@ -246,7 +246,7 @@ score = model.fit(train_generator,
 model.evaluate(test_generator)
 ```
 
-Now that the model has been fit, we can plot the validation and training loss, which we see plateaus after about 750 epochs.
+Now that the model has been fit, we can plot the validation and training loss, which we see plateaus after about 850 epochs.
 
 ```{python}
 #| label: val_loss_fig
@@ -274,30 +274,37 @@ ax.set_ylabel("Loss")
 plt.show()
 ```
 
-Next we can look at the accuracy of the model on the validation data.
+Next we can look at the accuracy of the model on the validation data:
 
 ```{python}
 #| warning: false
 #| echo: true
 
-df_result = pd.DataFrame({'Actual' : [], 'Prediction' : []})
+# Create list to put results in
+results_list = []
 
+# Loop through actuals and get predictions from model
 for i in range(len(hold_generator)):
     x, y = hold_generator[i]
     x_input = array(x).reshape((1, lookback_length, n_features))
     yhat = model.predict(x_input, verbose=0)
-    df_result = df_result.append({'Actual': y[0][0], 'Prediction':yhat[0][0]}, ignore_index=True)
-    
+    results_list.append({'Actual': y[0][0], 'Prediction':yhat[0][0]})
+
+# Convert to dataframe
+df_result = pd.DataFrame(results_list)
+
 # Calculate MASE
 from sktime.performance_metrics.forecasting import MeanAbsoluteScaledError
-
 mase = MeanAbsoluteScaledError()
-y_true = pd.Series(data=df_result['Actual'])
-y_pred = pd.Series(data=df_result['Prediction'])
-y_train = pd.Series(data=train_data['QUANTITY'])
 
-print("MASE score:", round(mase(y_true=y_true,y_pred=y_pred,y_train=y_train),2))
+print("MASE score:", round(mase(
+y_true=df_result['Actual'],
+y_pred=df_result['Prediction'],
+y_train=train_data['QUANTITY']),2)
+)
 ```
+
+Our very simple network yielded a MASE score of 1.34, which is worse than a naive forecast, but not very far off. For difficult to predict time series like this one, often you will not get a model that outperforms a naive forecast, so this result is not unexpected. Next we can look at a plot of the predictions against the actuals:
 
 ```{python}
 #| label: "predictions_plot"
@@ -311,7 +318,7 @@ sns.lineplot(x=range(len(df_result)), y=df_result['Actual'], ax=ax, label="Actua
 sns.lineplot(x=range(len(df_result)), y=df_result['Prediction'], ax=ax, label="Predictions")
 
 # Set the title and labels of plot
-ax.set_title("Actuals vs Predictions for Heldout Data")
+ax.set_title("Actuals vs Predictions for Held Out Data")
 ax.set_xlabel("Time")
 ax.set_ylabel("Quantity")
 ax.set(xticklabels=[])
@@ -320,12 +327,64 @@ ax.set(xticklabels=[])
 plt.show()
 ```
 
-\
-\
-\
-\
-\
-\
-\
+The RNN is approximating the general shape of the held out data most of the time, which is promising. While there is a lot more tuning of this model that could be done, this is a decent baseline already!
+
+## Using an LSTM instead of Simple RNN
+
+While RNN's are a powerful way to model sequential data like a time series, a Long Short-Term Memory (LSTM) is a newer approach to neural networks that can track longer term dependencies more effectively than a RNN. We can build an LSTM model and compare its performance to our simple RNN.
+
+```{python}
+# Initialize model
+model2 = Sequential(name="LSTM_Model")
+
+# Add three LSTM layers
+model2.add(LSTM(100, activation='relu', input_shape=(lookback_length, n_features), return_sequences = True))
+model2.add(LSTM(50, activation='relu', input_shape=(lookback_length, n_features), return_sequences = True))
+model2.add(LSTM(25,activation='relu'))
+
+# Add fully connected layer
+model2.add(Dense(1, activation='relu'))
+
+# Define optimizer
+adam = Adam(learning_rate=0.001)
+
+# Register the custom metric function with the Keras model.
+model2.compile(loss='mse',optimizer='adam',metrics = ['mse', 'mae'])
+
+# Summarize model we've created
+model2.summary()
+
+# Fit model
+score2 = model2.fit(train_generator, 
+  epochs=1000, 
+  validation_data=test_generator,
+  callbacks=[early_stopping],
+  verbose=1)
+  
+model2.evaluate(hold_generator)
+model.evaluate(hold_generator)
+
+# Create list to put results in
+results_list2 = []
+
+# Loop through actuals and get predictions from model
+for i in range(len(hold_generator)):
+    x, y = hold_generator[i]
+    x_input = array(x).reshape((1, lookback_length, n_features))
+    yhat = model2.predict(x_input, verbose=0)
+    results_list2.append({'Actual': y[0][0], 'Prediction':yhat[0][0]})
+
+# Convert to dataframe
+df_result2 = pd.DataFrame(results_list2)
+
+# Calculate MASE
+from sktime.performance_metrics.forecasting import MeanAbsoluteScaledError
+
+mase = MeanAbsoluteScaledError()
+
+print("MASE score:", round(mase(y_true=df_result2[['Actual']],y_pred=df_result2[['Prediction']].astype('float32'),y_train=train_data['QUANTITY']),2))
+```
+
+##      
 
 \

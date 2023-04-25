@@ -1,5 +1,0 @@
-"0",""
-"0","# Filter to only those combos with the maximum of 187 weeks"
-"0","df.ts %<>% "
-"0","  group_by(sku) %>% "
-"0","  filter(n()==187)"
