@@ -1,0 +1,331 @@
+---
+title: "Recurrent Neural Network Forecasting with Keras"
+author: "David Saltzman"
+format: gfm
+editor: visual
+---
+
+# The Business Problem
+
+QueBIT...
+
+## Data Cleaning
+
+```{python}
+#| warning: false
+#| echo: true
+# Import libraries
+import pandas as pd
+import tensorflow as tf
+import numpy as np
+
+# Plotting libraries
+import matplotlib.pyplot as plt
+import seaborn as sns
+sns.set(rc={"figure.dpi":400, 'savefig.dpi':400})
+
+# Import functions that will be needed
+from numpy import array
+from sklearn.model_selection import train_test_split
+from keras.models import Sequential
+from keras.layers import Dense
+from keras.layers import LSTM
+from keras.layers import RNN, SimpleRNN
+from keras.preprocessing.sequence import TimeseriesGenerator
+from keras.layers import Dropout
+from keras.optimizers import Adam
+from keras.layers.core import Activation
+from keras.callbacks import EarlyStopping
+from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import MinMaxScaler
+
+# Set random seed
+np.random.seed(401)
+```
+
+Before preprocessing for the neural network can occur, we need to clean up the data, which is a little messy. I removed the whitespace in some of the cells, removed placeholders that should be NA's, and other non-standard formatting. The time-series are
+
+```{python}
+#| warning: false
+#| echo: true
+# Read in data
+df = (
+  pd.read_csv("keras_rnn_data.csv")
+  .rename(columns={'PERIOD_DATE':'DATE',
+  'PRODUNIT_ID':'ID',
+  'QTY':'QUANTITY'})
+  .sort_values(by=['DATE','ID'])
+  .astype({'DATE': 'datetime64[ns]'})
+)
+
+# Remove whitespace, dashes, and commas from quantity 
+df['QUANTITY'] = (
+  df['QUANTITY']
+  .str.strip()
+  .replace({'-':'0',',':''},regex=True)
+  .astype(int)
+)
+
+# Count # of observations for each SKU
+print(df['ID'].
+  value_counts().
+  sort_values(ascending=False))
+
+# Fill in missing days
+import janitor
+df = df.complete(
+    {'DATE': lambda date: pd.date_range(date.min(), date.max())}, 
+    by = ['ID'],
+    fill_value=0,
+    sort = True)
+    
+# Count # of observations after
+print(df['ID'].
+  value_counts().
+  sort_values(ascending=False))
+  
+# Set index
+df = df.set_index(['DATE'])
+
+# Subset for testing purposes
+df = df[df['ID'] == 'PICK-BULK'].reindex()
+
+# Drop ID column as it is no longer needed
+df = df.drop('ID',axis=1)
+```
+
+## Feature Engineering
+
+The RNN that we are building cannot take dates as an input, and therefore our dataframe column containing the dates needs to be transformed into numeric series that represent each element of the date. This also in turn provides more information to the neural network to attempt to learn a pattern.
+
+```{python}
+#| warning: false
+#| echo: true
+
+# Create various temporal features
+df_features = (df
+                .assign(day = df.index.day)
+                .assign(month = df.index.month)
+                .assign(day_of_week = df.index.dayofweek)
+                .assign(week_of_year = df.index.week)
+                )
+```
+
+## Splitting the data
+
+We then split the data using a split of 70% of the data for training, the subsequent 15% of the data for validation, and the final 15% of data is held out to assess the generalization of the model.
+
+```{python}
+#| warning: false
+#| echo: true
+
+# Define the sizes for training, testing, and holdout sets
+train_size = 0.8  # 80% of data for training
+test_size = 0.2  # 20% of data for testing (will be further split into holdout data )
+
+# Split the data into a training and test set first
+train_data, test_data = train_test_split(df_features, test_size=test_size, shuffle=False)
+
+# Then split the remaining data 50/50 (i.e., the "rightmost" portion of the original data) into a test and holdout set
+test_data, holdout_data = train_test_split(test_data, test_size=0.5, shuffle=False)
+
+# The resulting data are now split into training, testing, and holdout sets
+print("Training data size:", len(train_data))
+print("Testing data size:", len(test_data))
+print("Holdout data size:", len(holdout_data))
+```
+
+```{python}
+#| warning: false
+#| echo: true
+#| include: false
+
+# After splitting the data, I standardized the output values (QUANTITY) in the training data, and then use the transformation derived from the training set to standardize the test and held out data. This is to prevent data leakage, which could occur if we standardized the data before splitting it.
+
+# # Calculate values to standardize QUANTITY data
+# scaler = MinMaxScaler()
+# 
+# # Standardize QUANTITY in training data
+# train_data['QUANTITY'] = scaler.fit_transform(train_data[['QUANTITY']])
+# 
+# # Standardize QUANTITY in test data
+# test_data['QUANTITY'] = scaler.transform(test_data[['QUANTITY']])
+# 
+# # Standardize QUANTITY in held out data
+# holdout_data['QUANTITY'] = scaler.transform(holdout_data[['QUANTITY']])
+```
+
+The last step before we can build the model, we need to create a time series `dataset`, which essentially packages our time series data into something that the neural network can use to create batches of input/targets.
+
+```{python}
+#| warning: false
+#| echo: true
+
+# Get number of features and 
+n_features = train_data.shape[1]
+lookback_length = 5
+
+# create training generator
+train_generator = TimeseriesGenerator(
+  train_data.values,
+  train_data.values[:,0].reshape((len(train_data.values), 1)),
+  length=lookback_length,
+  batch_size=len(train_data)
+)
+
+# create test generator
+test_generator = TimeseriesGenerator(
+  test_data.values,
+  test_data.values[:,0].reshape((len(test_data.values), 1)),
+  length=lookback_length,
+  batch_size=1
+)
+
+# create holdout generator
+hold_generator = TimeseriesGenerator(
+  holdout_data.values,
+  holdout_data.values[:,0].reshape((len(holdout_data.values), 1)),
+  length=lookback_length,
+  batch_size=1
+)
+```
+
+## Building the network
+
+Now we get to the fun part, which is assembling the model. Keras allows you to easily assemble complicated models with the `.add` function, where you define the various layers of your model. A simple recurrent neural network seems like an appropriate place to start for predicting time series, as an RNN keeps a copy of its hidden unit's previous state and uses it as input to the next iteration. RNN's have worked well for other types of sequential data, like models of reading, where each word in a sentence builds on the meaning of the previous.
+
+```{python}
+#| warning: false
+#| echo: true
+
+print("timesteps, features:", lookback_length, n_features)
+
+# Initialize model
+model = Sequential()
+
+# Add recurrence to model
+model.add(SimpleRNN(4, activation='relu', input_shape=(lookback_length, n_features), return_sequences = False))
+
+# Add fully connected layer
+model.add(Dense(1, activation='relu'))
+
+# Define optimizer
+adam = Adam(learning_rate=0.001)
+
+# Register the custom metric function with the Keras model.
+model.compile(loss='mse',optimizer='adam',metrics = ['mse', 'mae'])
+
+# Summarize model we've created
+model.summary()
+```
+
+## Fitting the model
+
+It is also a good idea to define an early stopping rule, which is to end model training once validation loss plateaus. If we continue training the model beyond there, we risk venturing into overfitting territory.
+
+```{python}
+#| warning: false
+#| echo: true
+
+# Define early stopping rule
+early_stopping = EarlyStopping(monitor='val_loss',
+                                patience=5,
+                                mode='auto',
+                                min_delta=0.1,
+                                restore_best_weights=True,
+                                verbose=1)
+                                
+# Fit RNN
+score = model.fit(train_generator, 
+  epochs=1000, 
+  validation_data=test_generator,
+  callbacks=[early_stopping],
+  verbose=1)
+  
+# Evaluate model
+model.evaluate(test_generator)
+```
+
+Now that the model has been fit, we can plot the validation and training loss, which we see plateaus after about 750 epochs.
+
+```{python}
+#| label: val_loss_fig
+#| fig-cap: "Plot showing training and validation loss during model fitment"
+#| warning: false
+
+# Get training + validation loss
+losses = score.history['loss']
+val_losses = score.history['val_loss']
+
+# Create a figure and axes
+fig, ax = plt.subplots()
+sns.set_style("darkgrid")
+
+# Plot training and validation losses
+sns.lineplot(x=range(len(losses)), y=losses, ax=ax, label="Training Loss")
+sns.lineplot(x=range(len(val_losses)), y=val_losses, ax=ax, label="Validation Loss",linestyle="--")
+
+# Set the title and labels of plot
+ax.set_title("Training and Validation Losses")
+ax.set_xlabel("Epoch")
+ax.set_ylabel("Loss")
+
+# Show plot
+plt.show()
+```
+
+Next we can look at the accuracy of the model on the validation data.
+
+```{python}
+#| warning: false
+#| echo: true
+
+df_result = pd.DataFrame({'Actual' : [], 'Prediction' : []})
+
+for i in range(len(hold_generator)):
+    x, y = hold_generator[i]
+    x_input = array(x).reshape((1, lookback_length, n_features))
+    yhat = model.predict(x_input, verbose=0)
+    df_result = df_result.append({'Actual': y[0][0], 'Prediction':yhat[0][0]}, ignore_index=True)
+    
+# Calculate MASE
+from sktime.performance_metrics.forecasting import MeanAbsoluteScaledError
+
+mase = MeanAbsoluteScaledError()
+y_true = pd.Series(data=df_result['Actual'])
+y_pred = pd.Series(data=df_result['Prediction'])
+y_train = pd.Series(data=train_data['QUANTITY'])
+
+print("MASE score:", round(mase(y_true=y_true,y_pred=y_pred,y_train=y_train),2))
+```
+
+```{python}
+#| label: "predictions_plot"
+#| fig-cap: "Plot of the actuals vs predictions made by the RNN on held out data"
+
+# Create a figure and axes
+fig, ax = plt.subplots()
+
+# Plot training and validation losses
+sns.lineplot(x=range(len(df_result)), y=df_result['Actual'], ax=ax, label="Actuals")
+sns.lineplot(x=range(len(df_result)), y=df_result['Prediction'], ax=ax, label="Predictions")
+
+# Set the title and labels of plot
+ax.set_title("Actuals vs Predictions for Heldout Data")
+ax.set_xlabel("Time")
+ax.set_ylabel("Quantity")
+ax.set(xticklabels=[])
+
+# Show plot
+plt.show()
+```
+
+\
+\
+\
+\
+\
+\
+\
+
+\
