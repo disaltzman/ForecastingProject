@@ -7,13 +7,14 @@ editor: visual
 
 # The Business Problem
 
-With the proliferation if interest in deep learning across almost all financial sectors, QueBIT wanted me and a team of other consultants to investigate how a deep learning might be used in their forecasting approach for on client data. The dataset that I used was daily level data of actions performed in a warehouse, and the client wanted to forecast how many of these actions would be taken in the future as to adjust hiring accordingly. This dataset covered almost two years worth of data, which made it a better candidate for a neural network than sales data, which tended to be monthly and insufficient for training a model to outperform a naive forecast.
+With the proliferation if interest in deep learning across industries, QueBIT wanted to investigate how a deep learning might be used in their forecasting approach for on client data. The dataset we chose covered almost two years worth of data at the daily level, which made it a better candidate for a neural network than sales data, as most sales data to be monthly and insufficient for training a model to outperform a naive forecast.
 
 ## Data Cleaning
 
 ```{python}
 #| warning: false
 #| echo: true
+#| error: false
 # Import libraries
 import pandas as pd
 import tensorflow as tf
@@ -43,14 +44,15 @@ from sklearn.preprocessing import MinMaxScaler
 np.random.seed(401)
 ```
 
-Before preprocessing for the neural network can occur, we need to clean up the data, which is a little messy. I removed the whitespace in some of the cells, removed placeholders that should be NA's, and other non-standard formatting. The time-series are
+Before preprocessing for the neural network can occur, we need to clean up the data, which is a little messy. I removed the whitespace in some of the cells, removed placeholders that should be NA's, and other non-standard formatting. There are multiple different time series contained in this dataset, and for the purposes of testing we narrowed it down to just one SKU that contained very few periods with zero demand.
 
 ```{python}
 #| warning: false
 #| echo: true
+#| error: false
 # Read in data
 df = (
-  pd.read_csv("keras_rnn_data.csv")
+  pd.read_csv("rnn_keras_data.csv")
   .rename(columns={'PERIOD_DATE':'DATE',
   'PRODUNIT_ID':'ID',
   'QTY':'QUANTITY'})
@@ -70,7 +72,12 @@ df['QUANTITY'] = (
 print(df['ID'].
   value_counts().
   sort_values(ascending=False))
+```
 
+```{python}
+#| warning: false
+#| echo: true
+#| error: false
 # Fill in missing days
 import janitor
 df = df.complete(
@@ -88,7 +95,7 @@ print(df['ID'].
 df = df.set_index(['DATE'])
 
 # Subset for testing purposes
-df = df[df['ID'] == 'PICK-BULK'].reindex()
+df = df[df['ID'] == 'ID1'].reindex()
 
 # Drop ID column as it is no longer needed
 df = df.drop('ID',axis=1)
@@ -101,6 +108,7 @@ The RNN that we are building cannot take dates as an input, and therefore our da
 ```{python}
 #| warning: false
 #| echo: true
+#| error: false
 
 # Create various temporal features
 df_features = (df
@@ -118,6 +126,7 @@ We then split the data using a split of 70% of the data for training, the subseq
 ```{python}
 #| warning: false
 #| echo: true
+#| error: false
 
 # Define the sizes for training, testing, and holdout sets
 train_size = 0.8  # 80% of data for training
@@ -155,13 +164,14 @@ print("Holdout data size:", len(holdout_data))
 # holdout_data['QUANTITY'] = scaler.transform(holdout_data[['QUANTITY']])
 ```
 
-The last step before we can build the model, we need to create a time series `dataset`, which essentially packages our time series data into something that the neural network can use to create batches of input/targets.
+The last step before we can build the model, we need to create a time series generator, which essentially packages our time series data into something that the neural network can use to create batches of input/targets.
 
 ```{python}
 #| warning: false
 #| echo: true
+#| error: false
 
-# Get number of features and 
+# Get number of features and lookback length
 n_features = train_data.shape[1]
 lookback_length = 5
 
@@ -197,11 +207,12 @@ Now we get to the fun part, which is assembling the model. Keras allows you to e
 ```{python}
 #| warning: false
 #| echo: true
+#| error: false
 
 print("timesteps, features:", lookback_length, n_features)
 
 # Initialize model
-model = Sequential(name=')
+model = Sequential(name='simpleRNN_Model')
 
 # Add recurrence to model
 model.add(SimpleRNN(50, activation='relu', input_shape=(lookback_length, n_features), return_sequences = False))
@@ -226,7 +237,7 @@ It is also a good idea to define an early stopping rule, which is to end model t
 ```{python}
 #| warning: false
 #| echo: true
-
+#| error: false
 # Define early stopping rule
 early_stopping = EarlyStopping(monitor='val_loss',
                                 patience=5,
@@ -240,18 +251,17 @@ score = model.fit(train_generator,
   epochs=1000, 
   validation_data=test_generator,
   callbacks=[early_stopping],
-  verbose=1)
-  
-# Evaluate model
-model.evaluate(test_generator)
+  verbose=0)
 ```
 
-Now that the model has been fit, we can plot the validation and training loss, which we see plateaus after about 850 epochs.
+Now that the model has been fit, we can plot the validation and training loss, which we can see plateaus and then stops way earlier than the 1,000 epochs we set for the model to potentially iterate through.
 
 ```{python}
 #| label: val_loss_fig
 #| fig-cap: "Plot showing training and validation loss during model fitment"
 #| warning: false
+#| error: false
+#| echo: false
 
 # Get training + validation loss
 losses = score.history['loss']
@@ -279,6 +289,7 @@ Next we can look at the accuracy of the model on the validation data:
 ```{python}
 #| warning: false
 #| echo: true
+#| error: false
 
 # Create list to put results in
 results_list = []
@@ -297,18 +308,21 @@ df_result = pd.DataFrame(results_list)
 from sktime.performance_metrics.forecasting import MeanAbsoluteScaledError
 mase = MeanAbsoluteScaledError()
 
-print("MASE score:", round(mase(
+simple_rnn_mase = round(mase(
 y_true=df_result['Actual'],
 y_pred=df_result['Prediction'],
-y_train=train_data['QUANTITY']),2)
+y_train=train_data['QUANTITY']),2
 )
+
+print("MASE Score:",simple_rnn_mase)
 ```
 
-Our very simple network yielded a MASE score of 1.34, which is worse than a naive forecast, but not very far off. For difficult to predict time series like this one, often you will not get a model that outperforms a naive forecast, so this result is not unexpected. Next we can look at a plot of the predictions against the actuals:
+Our simple RNN network performed worse than a naive forecast, but not very far off, which is promising. For difficult to predict time series like this one, often you will not get a model that outperforms a naive forecast, so this result is not unexpected. Next we can look at a plot of the predictions against the actuals:
 
 ```{python}
 #| label: "predictions_plot"
 #| fig-cap: "Plot of the actuals vs predictions made by the RNN on held out data"
+#| echo: false
 
 # Create a figure and axes
 fig, ax = plt.subplots()
@@ -331,9 +345,12 @@ The RNN is approximating the general shape of the held out data most of the time
 
 ## Using an LSTM instead of Simple RNN
 
-While RNN's are a powerful way to model sequential data like a time series, a Long Short-Term Memory (LSTM) is a newer approach to neural networks that can track longer term dependencies more effectively than a RNN. We can build an LSTM model and compare its performance to our simple RNN.
+While RNN's are a powerful way to model sequential data like a time series, a Long Short-Term Memory (LSTM) is a newer approach to neural networks that can track longer term dependencies more effectively than a RNN. We can build an LSTM model and compare its performance to our simple RNN. Below I build a deep LSTM network by stacking three LSTM networks.
 
 ```{python}
+#| warning: false
+#| echo: true
+#| error: false
 # Initialize model
 model2 = Sequential(name="LSTM_Model")
 
@@ -353,17 +370,21 @@ model2.compile(loss='mse',optimizer='adam',metrics = ['mse', 'mae'])
 
 # Summarize model we've created
 model2.summary()
+```
 
+In this case, we have created a much more complicated model, as the number of parameters is several orders of magnitude greater than our simple RNN. Fitting the model will tell us if this increase in complexity is worth it:
+
+```{python}
+#| echo: true
+#| warning: false
+#| error: false
 # Fit model
 score2 = model2.fit(train_generator, 
   epochs=1000, 
   validation_data=test_generator,
   callbacks=[early_stopping],
-  verbose=1)
+  verbose=0)
   
-model2.evaluate(hold_generator)
-model.evaluate(hold_generator)
-
 # Create list to put results in
 results_list2 = []
 
@@ -385,6 +406,6 @@ mase = MeanAbsoluteScaledError()
 print("MASE score:", round(mase(y_true=df_result2[['Actual']],y_pred=df_result2[['Prediction']].astype('float32'),y_train=train_data['QUANTITY']),2))
 ```
 
-##      
+The MASE score on the held out data for the deep LSTM model is worse than that of the simple RNN, which is not entirely unexpected. More tuning could be performed to improve the performance of this model, but it's also possible that there just isn't sufficient training data to warrant a model this complicated.
 
-\
+Ultimately, we concluded that deep learning is a very important domain to monitor as it becomes more and more accurate at predicting time series data, but in the near future it is unlikely most clients will have sufficient data to train a model that will outperform conventional statistical analyses.
